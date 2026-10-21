@@ -133,10 +133,12 @@ func ResourceNetwork() *schema.Resource {
 			},
 			"subnet": {
 				Description: "The IPv4 subnet for this network in CIDR notation (e.g., '192.168.1.0/24'). " +
-					"This defines the network's address space and determines the range of IP addresses available for DHCP.",
+					"This defines the network's address space and determines the range of IP addresses available for DHCP. " +
+					"The host part sets the gateway IP (e.g. '192.168.1.2/24' makes the gateway '192.168.1.2'); " +
+					"a network address such as '192.168.1.0/24' defaults the gateway to the first host ('192.168.1.1').",
 				Type:             schema.TypeString,
 				Optional:         true,
-				DiffSuppressFunc: utils.CidrDiffSuppress,
+				DiffSuppressFunc: utils.CidrGatewayDiffSuppress,
 				ValidateFunc:     utils.CidrValidate,
 			},
 			"network_group": {
@@ -907,13 +909,13 @@ func resourceNetworkGetResourceData(d *schema.ResourceData) (*unifi.Network, err
 	wanUsername, _ := d.Get("wan_username").(string)
 	wanPassword, _ := d.Get("x_wan_password").(string)
 
-	// For a LAN the `subnet` is the gateway address, so CidrOneBased applies the +1
-	// host offset. A vpn-client's subnet is the tunnel interface address; CidrZeroBased
+	// For a LAN the `subnet` is the gateway address: CidrGateway keeps an explicit host
+	// address and applies the +1 host offset to a bare network address. A vpn-client's subnet is the tunnel interface address; CidrZeroBased
 	// canonicalizes it to its network address (host bits drop below /32, which the
 	// CustomizeDiff rejects), so the /32 host address round-trips intact.
 	subnet, _ := d.Get("subnet").(string)
 	purpose, _ := d.Get("purpose").(string)
-	ipSubnet := utils.CidrOneBased(subnet)
+	ipSubnet := utils.CidrGateway(subnet)
 	if purpose == "vpn-client" {
 		ipSubnet = utils.CidrZeroBased(subnet)
 	}
@@ -1343,7 +1345,7 @@ func resourceNetworkSetResourceData(resp *unifi.Network, d *schema.ResourceData,
 		"name":    resp.Name,
 		"purpose": resp.Purpose,
 		"vlan_id": vlan,
-		"subnet":  utils.CidrZeroBased(resp.IPSubnet),
+		"subnet":  utils.CidrFromGateway(resp.IPSubnet),
 
 		"network_group": networkGroup,
 

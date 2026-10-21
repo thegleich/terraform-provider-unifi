@@ -612,6 +612,50 @@ func TestAccNetwork_vlanOnly(t *testing.T) {
 	})
 }
 
+// TestAccNetwork_customGateway covers a `subnet` whose host part is the gateway: it must reach the
+// controller as-is instead of being forced to the first host, and changing it must produce a diff.
+func TestAccNetwork_customGateway(t *testing.T) {
+	name := acctest.RandomWithPrefix("tfacc")
+	subnet, vlan := pt.GetTestVLAN(t)
+	prefix, _ := subnet.Mask.Size()
+	gateway2 := fmt.Sprintf("%s/%d", mustHost(t, subnet, 2), prefix)
+	gateway3 := fmt.Sprintf("%s/%d", mustHost(t, subnet, 3), prefix)
+
+	AcceptanceTest(t, AcceptanceTestCase{
+		CheckDestroy: testAccCheckNetworkDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccNetworkGatewayConfig(name, gateway2, vlan),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("unifi_network.test", "subnet", gateway2),
+					testAccCheckNetworkIPSubnet("unifi_network.test", gateway2),
+				),
+			},
+			pt.ImportStep("unifi_network.test"),
+			{
+				Config: testAccNetworkGatewayConfig(name, gateway3, vlan),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("unifi_network.test", plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("unifi_network.test", "subnet", gateway3),
+					testAccCheckNetworkIPSubnet("unifi_network.test", gateway3),
+				),
+			},
+			// a bare network address still defaults the gateway to the first host
+			{
+				Config: testAccNetworkGatewayConfig(name, subnet.String(), vlan),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("unifi_network.test", "subnet", subnet.String()),
+					testAccCheckNetworkIPSubnet("unifi_network.test", fmt.Sprintf("%s/%d", mustHost(t, subnet, 1), prefix)),
+				),
+			},
+		},
+	})
+}
+
 func TestAccNetwork_mdns(t *testing.T) {
 	name := acctest.RandomWithPrefix("tfacc")
 	subnet, vlan := pt.GetTestVLAN(t)
@@ -646,6 +690,28 @@ func quoteStrings(src []string) []string {
 		dst = append(dst, fmt.Sprintf("%q", s))
 	}
 	return dst
+}
+
+// testAccNetworkGatewayConfig takes the subnet as a string because net.IPNet.String() drops the
+// host part that carries the gateway.
+func testAccNetworkGatewayConfig(name string, subnet string, vlan int) string {
+	return fmt.Sprintf(`
+locals {
+	subnet  = "%[2]s"
+	vlan_id = %[3]d
+}
+
+resource "unifi_network" "test" {
+	name    = "%[1]s"
+	purpose = "corporate"
+
+	subnet       = local.subnet
+	vlan_id      = local.vlan_id
+	dhcp_start   = cidrhost(local.subnet, 6)
+	dhcp_stop    = cidrhost(local.subnet, 254)
+	dhcp_enabled = true
+}
+`, name, subnet, vlan)
 }
 
 func testAccNetworkConfigDHCPBoot(name string, subnet *net.IPNet, vlan int) string {
@@ -1206,6 +1272,25 @@ func mustHost(t *testing.T, subnet *net.IPNet, n int) string {
 		t.Fatalf("cidr.Host(%s, %d): %s", subnet, n, err)
 	}
 	return ip.String()
+}
+
+// testAccCheckNetworkIPSubnet asserts the gateway CIDR the controller actually stored, which state
+// cannot show for the default first-host gateway (it reads back as the network address).
+func testAccCheckNetworkIPSubnet(name, expected string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[name]
+		if !ok {
+			return fmt.Errorf("not found: %s", name)
+		}
+		n, err := testClient.GetNetwork(context.Background(), "default", rs.Primary.ID)
+		if err != nil {
+			return err
+		}
+		if n.IPSubnet != expected {
+			return fmt.Errorf("expected ip_subnet %q, got %q", expected, n.IPSubnet)
+		}
+		return nil
+	}
 }
 
 // testAccCheckNetworkDestroy asserts every unifi_network in state is gone from the
