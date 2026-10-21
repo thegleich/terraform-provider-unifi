@@ -56,6 +56,42 @@ func CidrOneBased(cidr string) string {
 	return cidrNet.String()
 }
 
+// CidrGateway returns the gateway CIDR the controller stores in ip_subnet. A host address
+// (e.g. 192.168.1.2/24) is an explicit gateway and kept as-is; a bare network address keeps
+// the historical default of the first host (CidrOneBased).
+func CidrGateway(cidr string) string {
+	ip, cidrNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return ""
+	}
+	if ip.Equal(cidrNet.IP) {
+		return CidrOneBased(cidr)
+	}
+	ones, _ := cidrNet.Mask.Size()
+	return fmt.Sprintf("%s/%d", ip, ones)
+}
+
+// CidrFromGateway maps a controller ip_subnet back to config form. The default first-host
+// gateway reads back as the network address so existing configurations and state stay
+// unchanged; any other gateway is kept so it can round-trip.
+func CidrFromGateway(cidr string) string {
+	gateway := CidrGateway(cidr)
+	if gateway == "" || gateway == CidrOneBased(cidr) {
+		return CidrZeroBased(cidr)
+	}
+	return gateway
+}
+
+// CidrGatewayDiffSuppress treats two subnets as equal when they resolve to the same gateway,
+// so 192.168.1.0/24 and 192.168.1.1/24 match but 192.168.1.2/24 does not.
+func CidrGatewayDiffSuppress(k, old, newValue string, d *schema.ResourceData) bool {
+	oldGateway, newGateway := CidrGateway(old), CidrGateway(newValue)
+	if oldGateway == "" || newGateway == "" {
+		return false
+	}
+	return oldGateway == newGateway
+}
+
 func CidrDiffSuppress(k, old, newValue string, d *schema.ResourceData) bool {
 	_, oldNet, err := net.ParseCIDR(old)
 	if err != nil {
