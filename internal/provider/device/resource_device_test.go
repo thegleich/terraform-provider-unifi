@@ -1,10 +1,14 @@
 package device
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/filipowm/go-unifi/unifi"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -216,34 +220,151 @@ func TestPortOverride_VLANValidators(t *testing.T) {
 	}
 }
 
-// portOverrideSetHash must key the set by port number ONLY, so a controller
-// echoing/auto-populating a per-port VLAN field (e.g. setting_preference or a
-// native VLAN) on an entry the user didn't declare it on cannot change the
-// element's set identity and churn the set (the backward-compat hazard). Two
-// blocks for the same port number must hash identically regardless of the VLAN
-// fields; different numbers must hash differently.
-func TestPortOverrideSetHash_StableByNumber(t *testing.T) {
-	bare := portOverrideData(map[string]interface{}{"number": 5})
-	echoed := portOverrideData(map[string]interface{}{
-		"number":                5,
-		"setting_preference":    "auto",
-		"native_networkconf_id": "net-auto",
-		"forward":               "native",
-	})
-	assert.Equal(t, portOverrideSetHash(bare), portOverrideSetHash(echoed),
-		"same port number must hash identically regardless of echoed VLAN fields")
-
-	other := portOverrideData(map[string]interface{}{"number": 6})
-	assert.NotEqual(t, portOverrideSetHash(bare), portOverrideSetHash(other),
-		"different port numbers must hash differently")
-
-	// Sanity: the hash must be a pure function of `number`.
-	assert.Equal(t, portOverrideSetHash(bare), portOverrideSetHash(bare))
+// deviceState builds the stored state of a device holding the given overrides.
+func deviceState(t *testing.T, overrides []interface{}) *terraform.InstanceState {
+	t.Helper()
+	d := ResourceDevice().TestResourceData()
+	d.SetId("device")
+	require.NoError(t, d.Set("mac", "aa:bb:cc:dd:ee:ff"))
+	require.NoError(t, d.Set("port_override", overrides))
+	return d.State()
 }
 
-// The new VLAN attributes must be Optional+Computed so an undeclared field reads
-// back the controller's value without a perpetual diff. This pairs with the
-// number-keyed set hash above; together they neutralize the upgrade churn.
+func deviceConfig(overrides []interface{}) *terraform.ResourceConfig {
+	return terraform.NewResourceConfigRaw(map[string]interface{}{
+		"mac":           "aa:bb:cc:dd:ee:ff",
+		"port_override": overrides,
+	})
+}
+
+// plannedPortOverrides diffs state against config and returns the planned
+// port_override set, i.e. what the provider would send on apply.
+func plannedPortOverrides(t *testing.T, state *terraform.InstanceState, cfg *terraform.ResourceConfig) map[int]map[string]interface{} {
+	t.Helper()
+	r := ResourceDevice()
+	diff, err := r.Diff(context.Background(), state, cfg, nil)
+	require.NoError(t, err)
+	d, err := schema.InternalMap(r.Schema).Data(state, diff)
+	require.NoError(t, err)
+	set, _ := d.Get("port_override").(*schema.Set)
+	planned := map[int]map[string]interface{}{}
+	for _, item := range set.List() {
+		m, _ := item.(map[string]interface{})
+		number, _ := m["number"].(int)
+		planned[number] = m
+	}
+	return planned
+}
+
+// The SDK keeps the existing set element when a planned one hashes the same, so
+// with a hash on `number` alone a changed field inside a declared port never
+// reached the plan, and nothing was sent.
+func TestPortOverride_ChangeInDeclaredPortIsPlanned(t *testing.T) {
+	state := deviceState(t, []interface{}{map[string]interface{}{
+		"number": 4, "forward": "native", "tagged_vlan_mgmt": "block_all", "setting_preference": "manual",
+	}})
+	cfg := deviceConfig([]interface{}{map[string]interface{}{
+		"number": 4, "forward": "disabled", "tagged_vlan_mgmt": "block_all", "setting_preference": "manual",
+	}})
+
+	planned := plannedPortOverrides(t, state, cfg)
+	require.Contains(t, planned, 4)
+	assert.Equal(t, "disabled", planned[4]["forward"])
+}
+
+// portOverrideChanges lists the port_override attributes a plan would change.
+func portOverrideChanges(t *testing.T, state *terraform.InstanceState, cfg *terraform.ResourceConfig) []string {
+	t.Helper()
+	diff, err := ResourceDevice().Diff(context.Background(), state, cfg, nil)
+	require.NoError(t, err)
+	var changes []string
+	if diff == nil {
+		return changes
+	}
+	for k, a := range diff.Attributes {
+		if strings.HasPrefix(k, "port_override.") && (a.Old != a.New || a.NewComputed || a.NewRemoved) {
+			changes = append(changes, fmt.Sprintf("%s: %q -> %q", k, a.Old, a.New))
+		}
+	}
+	return changes
+}
+
+// Once applied, the same config must plan nothing again, even though config
+// holds unset fields as nil while state reads them back as zero values, the SDK
+// fills in op_mode's default only when hashing config, and the controller fills
+// in values on fields a port doesn't declare.
+func TestPortOverride_ReapplyPlansNothing(t *testing.T) {
+	cfg := deviceConfig([]interface{}{
+		map[string]interface{}{
+			"number": 1, "name": "ap", "forward": "customize", "native_networkconf_id": "net-lan", "poe_mode": "auto",
+			"setting_preference": "manual", "tagged_vlan_mgmt": "custom", "excluded_network_ids": []interface{}{"net-a", "net-b"},
+		},
+		map[string]interface{}{
+			"number": 2, "poe_mode": "off", "setting_preference": "manual", "tagged_vlan_mgmt": "block_all",
+		},
+		map[string]interface{}{
+			"number": 3, "name": "server", "port_profile_id": "profile-server", "setting_preference": "auto",
+		},
+	})
+	controller := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{
+		{
+			PortIDX: 1, Name: "ap", Forward: "customize", NATiveNetworkID: "net-lan", PoeMode: "auto",
+			SettingPreference: "manual", TaggedVLANMgmt: "custom", ExcludedNetworkIDs: []string{"net-b", "net-a"},
+		},
+		{PortIDX: 2, PoeMode: "off", SettingPreference: "manual", TaggedVLANMgmt: "block_all", NATiveNetworkID: "net-lan", Forward: "native"},
+		{PortIDX: 3, Name: "server", PortProfileID: "profile-server", SettingPreference: "auto"},
+	}}
+
+	// apply runs a plan against state and reads the controller back the way
+	// Update does, returning the state it leaves behind.
+	r := ResourceDevice()
+	apply := func(state *terraform.InstanceState) *terraform.InstanceState {
+		diff, err := r.Diff(context.Background(), state, cfg, nil)
+		require.NoError(t, err)
+		d, err := schema.InternalMap(r.Schema).Data(state, diff)
+		require.NoError(t, err)
+		require.NoError(t, d.Set("port_override", portOverridesFromDevice(controller, d)))
+		return d.State()
+	}
+
+	state := apply(deviceState(t, nil))
+	assert.Empty(t, portOverrideChanges(t, state, cfg))
+}
+
+func TestPortOverridesFromDevice(t *testing.T) {
+	d := ResourceDevice().TestResourceData()
+	require.NoError(t, d.Set("port_override", []interface{}{
+		map[string]interface{}{"number": 4, "forward": "disabled", "poe_mode": "off"},
+	}))
+
+	got := portOverridesFromDevice(&unifi.Device{
+		PortOverrides: []unifi.DevicePortOverrides{
+			{PortIDX: 4, Forward: "native", PoeMode: "off", NATiveNetworkID: "net-default", SettingPreference: "manual"},
+			{PortIDX: 5, Forward: "all", NATiveNetworkID: "net-default"},
+		},
+	}, d)
+
+	byNumber := map[int]map[string]interface{}{}
+	for _, m := range got {
+		number, _ := m["number"].(int)
+		byNumber[number] = m
+	}
+	t.Run("DeclaredFieldsShowDrift", func(t *testing.T) {
+		assert.Equal(t, "native", byNumber[4]["forward"])
+		assert.Equal(t, "off", byNumber[4]["poe_mode"])
+	})
+	t.Run("UndeclaredFieldsStayEmpty", func(t *testing.T) {
+		assert.Equal(t, "", byNumber[4]["native_networkconf_id"])
+		assert.Equal(t, "", byNumber[4]["setting_preference"])
+	})
+	t.Run("UndeclaredPortsAreReadInFull", func(t *testing.T) {
+		assert.Equal(t, "all", byNumber[5]["forward"])
+		assert.Equal(t, "net-default", byNumber[5]["native_networkconf_id"])
+	})
+}
+
+// The VLAN attributes must be Optional+Computed so a field the user leaves unset
+// keeps the controller's value instead of planning a change to empty.
 func TestPortOverrideVLANFields_AreOptionalComputed(t *testing.T) {
 	elem, _ := ResourceDevice().Schema["port_override"].Elem.(*schema.Resource)
 	for _, attr := range []string{
