@@ -224,3 +224,5 @@ require (
 	gotest.tools/v3 v3.5.2 // indirect
 	tags.cncf.io/container-device-interface v1.1.0 // indirect
 )
+
+replace github.com/filipowm/go-unifi => github.com/thegleich/go-unifi v0.0.0-20261026163045-bd158f41a3cb
