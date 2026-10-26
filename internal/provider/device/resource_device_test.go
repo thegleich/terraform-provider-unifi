@@ -87,18 +87,20 @@ func stringSet(items ...string) *schema.Set {
 // as SDKv2 supplies them) so toPortOverride's type assertions don't panic.
 func portOverrideData(overrides map[string]interface{}) map[string]interface{} {
 	data := map[string]interface{}{
-		"number":                1,
-		"name":                  "",
-		"port_profile_id":       "",
-		"op_mode":               "switch",
-		"poe_mode":              "",
-		"aggregate_num_ports":   0,
-		"native_networkconf_id": "",
-		"tagged_vlan_mgmt":      "",
-		"forward":               "",
-		"excluded_network_ids":  stringSet(),
-		"voice_networkconf_id":  "",
-		"setting_preference":    "",
+		"number":                    1,
+		"name":                      "",
+		"port_profile_id":           "",
+		"op_mode":                   "switch",
+		"poe_mode":                  "",
+		"aggregate_num_ports":       0,
+		"native_networkconf_id":     "",
+		"tagged_vlan_mgmt":          "",
+		"forward":                   "",
+		"excluded_network_ids":      stringSet(),
+		"voice_networkconf_id":      "",
+		"setting_preference":        "",
+		"port_security_enabled":     false,
+		"port_security_mac_address": stringSet(),
 	}
 	for k, v := range overrides {
 		data[k] = v
@@ -370,6 +372,7 @@ func TestPortOverrideVLANFields_AreOptionalComputed(t *testing.T) {
 	for _, attr := range []string{
 		"native_networkconf_id", "tagged_vlan_mgmt", "forward",
 		"excluded_network_ids", "voice_networkconf_id", "setting_preference",
+		"port_security_enabled", "port_security_mac_address",
 	} {
 		s := elem.Schema[attr]
 		require.NotNil(t, s, "attribute %s must exist", attr)
@@ -377,6 +380,39 @@ func TestPortOverrideVLANFields_AreOptionalComputed(t *testing.T) {
 		assert.True(t, s.Computed, "%s must be Computed (to absorb controller echoes without churn)", attr)
 		assert.Nil(t, s.Default, "%s must not have a Default", attr)
 	}
+}
+
+// A port disabled the way the UniFi UI does it: forward = "disabled" with port
+// security enabled and no allowed MAC addresses.
+func TestToPortOverride_DisabledWithPortSecurity(t *testing.T) {
+	po, err := toPortOverride(portOverrideData(map[string]interface{}{
+		"number":                2,
+		"forward":               "disabled",
+		"port_security_enabled": true,
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "disabled", po.Forward)
+	assert.True(t, po.PortSecurityEnabled)
+	assert.Empty(t, po.PortSecurityMACAddress)
+}
+
+func TestPortOverride_PortSecurityRoundTrip(t *testing.T) {
+	in := portOverrideData(map[string]interface{}{
+		"number":                    3,
+		"port_security_enabled":     true,
+		"port_security_mac_address": stringSet("aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"),
+	})
+	po, err := toPortOverride(in)
+	require.NoError(t, err)
+	assert.True(t, po.PortSecurityEnabled)
+	// TypeSet -> unordered slice: assert membership, not order.
+	assert.ElementsMatch(t, []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}, po.PortSecurityMACAddress)
+
+	out := fromPortOverride(po)
+	assert.Equal(t, true, out["port_security_enabled"])
+	inMACs, _ := in["port_security_mac_address"].(*schema.Set)
+	outMACs, _ := out["port_security_mac_address"].(*schema.Set)
+	assert.True(t, inMACs.Equal(outMACs))
 }
 
 func radioSet(items ...map[string]interface{}) *schema.Set {

@@ -260,6 +260,27 @@ func ResourceDevice() *schema.Resource {
 							Computed:     true,
 							ValidateFunc: validation.StringInSlice([]string{"auto", "manual"}, false),
 						},
+						"port_security_enabled": {
+							Description: "Enable MAC address-based port security on this port, so only the MAC addresses in " +
+								"`port_security_mac_address` can use it. The UniFi UI disables a port by setting it together " +
+								"with `forward = \"disabled\"` and no allowed MAC addresses.\n\n" +
+								"Computed when not set, so the controller's current value is preserved without producing a diff. " +
+								"Note: the underlying field uses `omitempty`, so once enabled it cannot be switched back off " +
+								"through Terraform.",
+							Type:     schema.TypeBool,
+							Optional: true,
+							Computed: true,
+						},
+						"port_security_mac_address": {
+							Description: "Set of MAC addresses allowed on this port when `port_security_enabled` is true.\n\n" +
+								"Computed when not set, so the controller's current list is preserved without producing a diff. " +
+								"Note: the underlying field uses `omitempty`, so an empty set is not sent and cannot clear a " +
+								"list the controller already holds.",
+							Type:     schema.TypeSet,
+							Optional: true,
+							Computed: true,
+							Elem:     &schema.Schema{Type: schema.TypeString},
+						},
 					},
 				},
 			},
@@ -898,19 +919,31 @@ func toPortOverride(data map[string]interface{}) (unifi.DevicePortOverrides, err
 	forward, _ := data["forward"].(string)
 	voiceNetworkID, _ := data["voice_networkconf_id"].(string)
 	settingPreference, _ := data["setting_preference"].(string)
+	portSecurityEnabled, _ := data["port_security_enabled"].(bool)
+
+	var portSecurityMACAddresses []string
+	if set, ok := data["port_security_mac_address"].(*schema.Set); ok {
+		var err error
+		portSecurityMACAddresses, err = utils.SetToStringSlice(set)
+		if err != nil {
+			return unifi.DevicePortOverrides{}, fmt.Errorf("unable to process port_security_mac_address: %w", err)
+		}
+	}
 
 	po := unifi.DevicePortOverrides{
-		PortIDX:            idx,
-		Name:               name,
-		PortProfileID:      profileID,
-		OpMode:             opMode,
-		PoeMode:            poeMode,
-		NATiveNetworkID:    nativeNetworkID,
-		TaggedVLANMgmt:     taggedVLANMgmt,
-		Forward:            forward,
-		ExcludedNetworkIDs: excludedNetworkIDs,
-		VoiceNetworkID:     voiceNetworkID,
-		SettingPreference:  settingPreference,
+		PortIDX:                idx,
+		Name:                   name,
+		PortProfileID:          profileID,
+		OpMode:                 opMode,
+		PoeMode:                poeMode,
+		NATiveNetworkID:        nativeNetworkID,
+		TaggedVLANMgmt:         taggedVLANMgmt,
+		Forward:                forward,
+		ExcludedNetworkIDs:     excludedNetworkIDs,
+		VoiceNetworkID:         voiceNetworkID,
+		SettingPreference:      settingPreference,
+		PortSecurityEnabled:    portSecurityEnabled,
+		PortSecurityMACAddress: portSecurityMACAddresses,
 	}
 
 	// go-unifi v1.9 tracks the current controller API, which expresses a LAG
@@ -946,12 +979,14 @@ func fromPortOverride(po unifi.DevicePortOverrides) map[string]interface{} {
 		// Per-port VLAN overrides, round-tripped unconditionally to match the
 		// existing fields above (keeps ImportStateVerify consistent).
 		// portOverridesFromDevice drops the ones a declared port leaves unset.
-		"native_networkconf_id": po.NATiveNetworkID,
-		"tagged_vlan_mgmt":      po.TaggedVLANMgmt,
-		"forward":               po.Forward,
-		"excluded_network_ids":  utils.StringSliceToSet(po.ExcludedNetworkIDs),
-		"voice_networkconf_id":  po.VoiceNetworkID,
-		"setting_preference":    po.SettingPreference,
+		"native_networkconf_id":     po.NATiveNetworkID,
+		"tagged_vlan_mgmt":          po.TaggedVLANMgmt,
+		"forward":                   po.Forward,
+		"excluded_network_ids":      utils.StringSliceToSet(po.ExcludedNetworkIDs),
+		"voice_networkconf_id":      po.VoiceNetworkID,
+		"setting_preference":        po.SettingPreference,
+		"port_security_enabled":     po.PortSecurityEnabled,
+		"port_security_mac_address": utils.StringSliceToSet(po.PortSecurityMACAddress),
 	}
 }
 

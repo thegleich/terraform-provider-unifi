@@ -203,6 +203,12 @@ Computed when not set, so the controller's current value (which it may auto-popu
   - For non-PoE devices
   - To prevent unwanted power delivery
 - `port_profile_id` (String) The ID of a pre-configured port profile to apply to this port. Port profiles define settings like VLANs, PoE, and other port-specific configurations.
+- `port_security_enabled` (Boolean) Enable MAC address-based port security on this port, so only the MAC addresses in `port_security_mac_address` can use it. The UniFi UI disables a port by setting it together with `forward = "disabled"` and no allowed MAC addresses.
+
+Computed when not set, so the controller's current value is preserved without producing a diff. Note: the underlying field uses `omitempty`, so once enabled it cannot be switched back off through Terraform.
+- `port_security_mac_address` (Set of String) Set of MAC addresses allowed on this port when `port_security_enabled` is true.
+
+Computed when not set, so the controller's current list is preserved without producing a diff. Note: the underlying field uses `omitempty`, so an empty set is not sent and cannot clear a list the controller already holds.
 - `setting_preference` (String) Whether the port's settings are taken from a profile (`auto`) or set per-port (`manual`). Valid values are `auto` and `manual`. Per-port VLAN overrides (`native_networkconf_id`, `tagged_vlan_mgmt`, `forward`, `excluded_network_ids`) generally require `setting_preference = "manual"` to persist on the controller; with `auto` the controller may revert inline overrides to profile/auto behavior. Setting this to `manual` also overrides any `port_profile_id` on the same port. Computed when not set, so the value the controller attaches to the port is preserved without producing a diff.
 - `tagged_vlan_mgmt` (String) VLAN tagging behavior for the port. Valid values are:
 * `auto` - Automatically handle VLAN tags (recommended)
